@@ -9,7 +9,6 @@ import uuid
 from datetime import datetime
 from typing import Annotated
 
-import requests
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, Field
 
@@ -286,7 +285,6 @@ async def delete_dashboard_schedule(
 
     # Verify ownership: the schedule must belong to one of the user's agents
     orchestrator = get_orchestrator()
-    client = orchestrator.client
 
     try:
         all_schedules = await asyncio.to_thread(
@@ -331,34 +329,19 @@ async def delete_dashboard_schedule(
             detail="You do not own this schedule.",
         )
 
-    # Delete the schedule via Mage API
-    url = (
-        f"{client.base_url}/api/pipeline_schedules/{schedule_id}"
-        f"?project={client.project_name}"
-    )
-
+    # Delete through the client, like every other orchestrator call. This was
+    # the one HTTP call left outside `ask_orchestrator`: a Mage URL built by
+    # hand in this route, so an orchestrator that listed the schedule and then
+    # stopped answering came back as a 500 quoting the exception text -- on the
+    # very route whose ownership check, a few lines up, already answers 503.
+    # It also never reached th2etl, whose client has no `project_name` to
+    # build that URL from.
     try:
-        response = await asyncio.to_thread(
-            requests.delete, url, headers=client._get_headers(), timeout=15
-        )
-        if response.status_code not in (200, 204):
-            logger.error(
-                f"[REFRESH] Mage returned {response.status_code} deleting schedule {schedule_id}: "
-                f"{response.text}"
-            )
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Mage failed to delete schedule: {response.status_code}",
-            )
-    except requests.RequestException as exc:
-        logger.error(
-            f"[REFRESH] Failed to delete schedule {schedule_id}: {exc}",
-            exc_info=True,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to contact Mage API: {exc}",
-        )
+        await asyncio.to_thread(orchestrator.client.delete_schedule, schedule_id)
+    except OrchestratorUnavailable as exc:
+        raise outage_response(
+            exc, "deleting a dashboard schedule", get_settings(), logger
+        ) from exc
 
     logger.info(
         f"[REFRESH] Deleted schedule {schedule_id} for dashboard {dashboard_id}"

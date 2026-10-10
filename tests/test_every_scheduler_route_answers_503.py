@@ -625,6 +625,72 @@ def test_deleting_a_dashboard_schedule_answers_503_not_404(dashboard_client):
     assert "not found" not in got.text.lower()
 
 
+def _orchestrator_around(client):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(PIPELINE_UUID="agents", client=client)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [requests.ConnectionError("refused"), _answered(500)],
+    ids=["nobody answered", "answered 500"],
+)
+def test_an_orchestrator_that_fails_at_the_delete_itself_still_answers_503(
+    dashboard_client, failure
+):
+    """The test above stops at the ownership check, and so did the fix it
+    guards. The delete that follows was the one HTTP call this router made by
+    hand, outside `ask_orchestrator`: a Mage that listed the schedule and then
+    fell over answered a bare 500 quoting the exception text (#93).
+
+    Driven through a real `MageAPIClient` whose transport fails only on the
+    delete, so the ownership check passes and the request reaches the call
+    that was left out."""
+    import apowerb.bi.refresh_router as bi
+
+    owned = _Ok({"pipeline_schedules": [{"id": 1, "name": "75"}]})
+    with patch.object(mage_mod.requests, "get", return_value=owned), patch.object(
+        mage_mod.requests, "delete", side_effect=failure
+    ), patch.object(
+        bi, "get_orchestrator", lambda: _orchestrator_around(_dead_mage())
+    ), patch.object(
+        bi, "get_settings", lambda: _settings(api_key="a-real-mage-key")
+    ), patch.object(bi, "fetch_agents", lambda _email: [{"agent_id": 75}]):
+        got = dashboard_client.delete("/api/v1/dashboards/d1/schedules/1")
+    assert got.status_code == 503, got.text
+    assert got.json()["detail"].startswith("Mage ")
+    assert "Failed to contact Mage API" not in got.text
+
+
+def test_deleting_a_dashboard_schedule_reaches_th2etl_when_th2etl_is_selected(
+    dashboard_client,
+):
+    """The hand-built call was a Mage URL read off `client.project_name` and
+    `client._get_headers()`, neither of which `Th2etlAPIClient` has: under
+    `ORCHESTRATOR=th2etl` this route answered 500 with a healthy orchestrator
+    behind it. Deleting through the client is what makes the route follow the
+    orchestrator that was selected -- asserted on what th2etl was asked to
+    delete, not on the status alone."""
+    import apowerb.bi.refresh_router as bi
+
+    etl = Th2etlAPIClient("http://etl.internal:8009", timeout=1, api_key="k")
+    listed = _Ok([{"name": "75", "pipeline_name": "agents"}])
+    with patch.object(etl._http, "get", return_value=listed), patch.object(
+        etl._http, "delete", return_value=_Ok(None, status=204)
+    ) as deleted, patch.object(
+        bi, "get_orchestrator", lambda: _orchestrator_around(etl)
+    ), patch.object(bi, "get_settings", lambda: _settings()), patch.object(
+        bi, "fetch_agents", lambda _email: [{"agent_id": 75}]
+    ):
+        got = dashboard_client.delete("/api/v1/dashboards/d1/schedules/75")
+    assert got.status_code == 204, got.text
+    assert [call.args[0] for call in deleted.call_args_list] == [
+        "http://etl.internal:8009/schedulers/75",
+        "http://etl.internal:8009/triggers/75_trigger",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Third pass: a handler is only as good as what reaches it
 # ---------------------------------------------------------------------------

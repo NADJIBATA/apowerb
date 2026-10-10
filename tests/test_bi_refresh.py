@@ -190,16 +190,10 @@ class TestDeleteSchedule:
         dashboard = _make_fake_dashboard()
         client._mock_svc.get = AsyncMock(return_value=dashboard)
 
-        mock_response = MagicMock()
-        mock_response.status_code = 204
-
         # The endpoint now verifies ownership before deleting:
         # 1. It fetches all schedules to find the target by ID
         # 2. It checks the schedule's name matches one of the user's agents
         mock_orch_instance = MagicMock()
-        mock_orch_instance.client.base_url = "http://mage:6789"
-        mock_orch_instance.client.project_name = "default"
-        mock_orch_instance.client._get_headers.return_value = {}
         mock_orch_instance.PIPELINE_UUID = "pipe-uuid"
         # Return a schedule that matches sched-123 and belongs to agent1
         mock_orch_instance.client.get_pipeline_schedules.return_value = [
@@ -210,13 +204,11 @@ class TestDeleteSchedule:
         # fetch_agents must return an agent whose agent_id matches the schedule name
         client._mock_fetch.return_value = [{"agent_id": 1}]
 
-        with patch("apowerb.bi.refresh_router.requests.delete") as mock_req_delete:
-            mock_req_delete.return_value = mock_response
-
-            resp = client.delete(
-                f"/api/v1/dashboards/{dashboard.id}/schedules/sched-123"
-            )
-            assert resp.status_code == 204
+        resp = client.delete(f"/api/v1/dashboards/{dashboard.id}/schedules/sched-123")
+        assert resp.status_code == 204
+        # The delete goes through the orchestrator client, not through an HTTP
+        # call made by the route itself.
+        mock_orch_instance.client.delete_schedule.assert_called_once_with("sched-123")
 
     def test_delete_nonexistent(self, client):
         client._mock_svc.get = AsyncMock(side_effect=DashboardNotFoundError("fake-id"))
